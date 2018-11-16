@@ -500,6 +500,7 @@ data PersistValue = PersistString String
                   | PersistNull
                   -- | Creating some datatypes may require calling a function, using a special constructor, or other syntax. The string (which can have placeholders) is included into query without escaping. The recursive constructions are not allowed, i.e., [PersistValue] cannot contain PersistCustom values.
                   | PersistCustom Utf8 [PersistValue]
+                  | PersistList [PersistValue]
   deriving (Eq, Show, Read)
 
 -- | Avoid orphan instances.

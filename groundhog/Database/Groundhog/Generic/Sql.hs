@@ -262,6 +262,7 @@ defaultShowPrim (PersistUTCTime x) = show x
 defaultShowPrim (PersistZonedTime x) = show x
 defaultShowPrim (PersistNull) = "NULL"
 defaultShowPrim (PersistCustom _ _) = error "Unexpected PersistCustom"
+defaultShowPrim (PersistList as) = "(" <> (commasJoin $ map defaultShowPrim as) <> ")"
 
 {-# INLINABLE renderOrders #-}
 renderOrders :: SqlDb db => RenderConfig -> [Order db r] -> RenderS db r
