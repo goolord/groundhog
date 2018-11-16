@@ -24,6 +24,7 @@ import qualified Database.Groundhog.Generic.Migration as GM
 import Database.Groundhog.Generic.Sql
 import Database.Groundhog.Generic.Sql.Functions
 import qualified Database.Groundhog.Generic.PersistBackendHelpers as H
+import qualified Data.Vector as V
 
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Internal as PG
@@ -783,6 +784,7 @@ instance PGTF.ToField P where
   toField (P (PersistZonedTime (ZT t))) = PGTF.toField t
   toField (P PersistNull)               = PGTF.toField PG.Null
   toField (P (PersistCustom _ _))       = error "toField: unexpected PersistCustom"
+  toField (P (PersistList as))          = PGTF.toField $ V.fromList $ map P as
 
 type Getter a = PGFF.FieldParser a
 
