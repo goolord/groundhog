@@ -673,7 +673,7 @@ instance A.ToJSON PersistValue where
   toJSON (PersistDay d) = A.String $ T.pack $ show d
   toJSON (PersistZonedTime (ZT z)) = A.String $ T.pack $ show z
   toJSON PersistNull = A.Null
-  toJSON (PersistList a) = A.Array $ V.fromList $ map A.toJSON a
+  toJSON (PersistList a) = A.Array $ V.map A.toJSON a
   toJSON a@(PersistCustom _ _) = error $ "toJSON: unexpected " ++ show a
 
 instance Read (Key v u) => A.FromJSON (Key v u) where

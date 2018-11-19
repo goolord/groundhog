@@ -785,7 +785,7 @@ instance PGTF.ToField P where
   toField (P (PersistZonedTime (ZT t))) = PGTF.toField t
   toField (P PersistNull)               = PGTF.toField PG.Null
   toField (P (PersistCustom _ _))       = error "toField: unexpected PersistCustom"
-  toField (P (PersistList as))          = PGTF.toField $ V.fromList $ (coerce as :: [P])
+  toField (P (PersistList as))          = PGTF.toField $ (coerce as :: V.Vector P)
 
 type Getter a = PGFF.FieldParser a
 
