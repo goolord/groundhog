@@ -1,0 +1,23 @@
+packages:   ./groundhog/
+          , ./groundhog-inspector/
+          , ./groundhog-mysql/
+          , ./groundhog-pipes/
+          , ./groundhog-postgresql/
+          , ./groundhog-sqlite/
+          , ./groundhog-test/
+          , ./groundhog-th/
+source-repository-package
+ type: git
+ location: https://github.com/goolord/groundhog
+ tag: 28ffcbc53306ea9388b0c558bba72010fb97d829
+ subdir: groundhog
+source-repository-package
+ type: git
+ location: https://github.com/goolord/groundhog
+ tag: 28ffcbc53306ea9388b0c558bba72010fb97d829
+ subdir: groundhog-th
+source-repository-package
+ type: git
+ location: https://github.com/goolord/groundhog
+ tag: 28ffcbc53306ea9388b0c558bba72010fb97d829
+ subdir: groundhog-postgresql

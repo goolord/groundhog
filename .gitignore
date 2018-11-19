@@ -11,3 +11,5 @@ cabal.sandbox.config
 .stack-work/
 groundhog*/.ghc*
 groundhog*/dist*
+dist*
+.ghc*

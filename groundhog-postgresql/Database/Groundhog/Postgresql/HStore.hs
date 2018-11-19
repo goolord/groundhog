@@ -36,7 +36,7 @@ import Database.PostgreSQL.Simple.HStore
 
 import Data.Aeson (Value)
 import qualified Blaze.ByteString.Builder as B
-import Control.Applicative
+-- import Control.Applicative
 import qualified Data.Map as Map
 import Data.String
 

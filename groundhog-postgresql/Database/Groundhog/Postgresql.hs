@@ -15,6 +15,7 @@ module Database.Groundhog.Postgresql
     , showSqlType
     ) where
 
+import Data.Coerce (coerce)
 import Database.Groundhog
 import Database.Groundhog.Core
 import Database.Groundhog.Expression
@@ -50,7 +51,7 @@ import Data.Int (Int64)
 import Data.IORef
 import Data.List (groupBy, intercalate, isPrefixOf, stripPrefix)
 import Data.Maybe (fromJust, fromMaybe, isJust, mapMaybe)
-import Data.Monoid hiding ((<>))
+-- import Data.Monoid hiding ((<>))
 import Data.Pool
 import Data.Time.LocalTime (localTimeToUTC, utc)
 
@@ -784,7 +785,7 @@ instance PGTF.ToField P where
   toField (P (PersistZonedTime (ZT t))) = PGTF.toField t
   toField (P PersistNull)               = PGTF.toField PG.Null
   toField (P (PersistCustom _ _))       = error "toField: unexpected PersistCustom"
-  toField (P (PersistList as))          = PGTF.toField $ V.fromList $ map P as
+  toField (P (PersistList as))          = PGTF.toField $ V.fromList $ (coerce as :: [P])
 
 type Getter a = PGFF.FieldParser a
 
