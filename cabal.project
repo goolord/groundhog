@@ -1,0 +1,8 @@
+packages:   ./groundhog/
+          , ./groundhog-inspector/
+          , ./groundhog-mysql/
+          , ./groundhog-postgresql/
+          , ./groundhog-sqlite/
+          , ./groundhog-test/
+          , ./groundhog-th/
+
