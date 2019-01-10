@@ -47,8 +47,7 @@ module GroundhogTest (
     , testNoColumns
     , testNoKeys
     , testJSON
-    , testTryActionThrownException
-    , testTryActionExceptT
+    , testTryAction
     , testMigrateOrphanConstructors
     , testSchemas
     , testFloating
@@ -106,7 +105,7 @@ import Data.ByteString.Char8 (unpack)
 import Data.Function (on)
 import Data.Int
 import Data.List (intercalate, isInfixOf, sort)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, fromJust)
 import qualified Data.Map as Map
 import qualified Data.String.Utils as Utils
 import qualified Data.Text as Text
@@ -404,7 +403,7 @@ testCond = do
                "postgresql" -> " IS NOT DISTINCT FROM "
                "mysql" -> "<=>"
                _ -> "="
-            query' = Utils.replace "=" equals query
+            query' = Utils.replace " IS " equals query
          in (query', map toPrimitivePersistValue vals) @=? (unpack $ fromUtf8 $ q, v [])
 
   let intField f = f `asTypeOf` (undefined :: Field (Single (Int, Int)) c a)
@@ -433,7 +432,10 @@ testCond = do
   ("single#val0=? AND single#val1=?", ["abc", "def"]) === ((() ==. () ||. ((), ()) <. ((), ())) &&. SingleField ==. ("abc", "def"))
 
   -- test conditions used as expressions
-  ("(?=?)=(?=?)", [1, 1, 0, 0 :: Int]) === (((1 :: Int) ==. (1 :: Int)) ==. ((0 :: Int) ==. (0 :: Int)))
+  ("(?=?)=(?=?)", [1, 1, 0, 0] :: [Int]) === (((1 :: Int) ==. (1 :: Int)) ==. ((0 :: Int) ==. (0 :: Int)))
+
+  -- test nullable expressions
+  ("single#val0 IS ? AND single#val1=?", ["abc", "def"]) === (SingleField ==. (Just "abc", "def"))
 
 testCount :: PersistBackend m => m ()
 testCount = do
@@ -512,7 +514,8 @@ testListTriggersOnDelete = do
   migr (undefined :: Single (String, [[String]]))
   proxy <- phantomDb
   k <- insert (Single ("", [["abc", "def"]]) :: Single (String, [[String]]))
-  Just [listKey] <- queryRaw' "select \"single#val1\" from \"Single#Tuple2##String#List##List##String\" where id=?" [toPrimitivePersistValue k] >>= firstRow
+  listKey' <- queryRaw' "select \"single#val1\" from \"Single#Tuple2##String#List##List##String\" where id=?" [toPrimitivePersistValue k] >>= firstRow
+  let listKey = head $ fromJust listKey'
   listsInsideListKeys <- queryRaw' "select value from \"List##List##String#values\" where id=?" [listKey] >>= streamToList
   deleteBy k
   -- test if the main list table and the associated values were deleted
@@ -531,7 +534,8 @@ testListTriggersOnUpdate = do
   migr val
   proxy <- phantomDb
   k <- insert val
-  Just [listKey] <- queryRaw' "select \"single\" from \"Single#List##List##String\" where id=?" [toPrimitivePersistValue k] >>= firstRow
+  listKey' <- queryRaw' "select \"single\" from \"Single#List##List##String\" where id=?" [toPrimitivePersistValue k] >>= firstRow
+  let listKey = head $ fromJust listKey'
   listsInsideListKeys <- queryRaw' "select value from \"List##List##String#values\" where id=?" [listKey] >>= streamToList
   replace k (Single [] :: Single [[String]])
   -- test if the main list table and the associated values were deleted
@@ -578,8 +582,8 @@ testReplaceMulti = do
   proxy <- phantomDb
   -- we need Single to test that referenced value can be replaced
   k <- insert $ Single (Second "abc")
-  Just [valueKey'] <- queryRaw' "SELECT \"single\" FROM \"Single#Multi#String\" WHERE id=?" [toPrimitivePersistValue k] >>= firstRow
-  let valueKey = fromPrimitivePersistValue valueKey'
+  valueKey' <- queryRaw' "SELECT \"single\" FROM \"Single#Multi#String\" WHERE id=?" [toPrimitivePersistValue k] >>= firstRow
+  let valueKey = fromPrimitivePersistValue $ head $ fromJust valueKey'
 
   replace valueKey (Second "def")
   replaced <- get valueKey
@@ -598,8 +602,8 @@ testReplaceSingle = do
   migr val
   proxy <- phantomDb
   k <- insert val
-  Just [valueKey'] <- queryRaw' "SELECT \"single\" FROM \"Single#Single#String\" WHERE id=?" [toPrimitivePersistValue k] >>= firstRow
-  let valueKey = fromPrimitivePersistValue valueKey'
+  valueKey' <- queryRaw' "SELECT \"single\" FROM \"Single#Single#String\" WHERE id=?" [toPrimitivePersistValue k] >>= firstRow
+  let valueKey = fromPrimitivePersistValue $ head $ fromJust valueKey'
   replace valueKey (Single "def")
   replaced <- get valueKey
   Just (Single "def") @=? replaced
@@ -855,87 +859,49 @@ testNoKeys = do
 
 testJSON :: PersistBackend m => m ()
 testJSON = do
-  let val = Single "abc"
+  let val = Single (A.toJSON [1 :: Int, 2])
   migr val
   k <- insert val
+  Just val @=?? get k
+
+  -- test conversion of Key to JSON
   A.Success k @=? A.fromJSON (A.toJSON k)
 
+testTryAction :: ( MonadIO m
+                 , MonadBaseControl IO m
+                 , MonadCatch m
+                 , TryConnectionManager conn
+                 , ConnectionManager conn
+                 , PersistBackendConn conn
+                 , ExtractConnection conn conn)
+              => conn -> m ()
+testTryAction c = do
+  result <- runTryDbConn success c
+  checkRight result
 
+  result <- runTryDbConn dbException c
+  checkLeft result  -- should be (Left error)
 
-testTryActionThrownException :: ( MonadIO m
-                                , MonadBaseControl IO m
-                                , MonadCatch m
-                                , TryConnectionManager conn
-                                , ConnectionManager conn
-                                , PersistBackendConn conn
-                                , ExtractConnection conn conn)
-                             => conn -> m ()
-testTryActionThrownException c = do
-  singleKey <- runDbConn op1 c
-  let settable = Settable "abc" (Just singleKey) (1, ("qqq", Nothing))
-  shouldFail <- runTryDbConn (op2 settable) c
-  checkLeft shouldFail
-  shouldSucceed <- runTryDbConn (op3 settable) c
-  checkRight shouldSucceed
-
-  where
-    op1 :: (PersistBackend m) => m (Key (Single String) BackendSpecific)
-    op1 = do
-      let val = Single "def"
-      migr val
-      k <- insert val
-      return k
-
-    op2 :: (MonadIO m, Functor m, PersistBackendConn conn) => Settable -> TryAction TestException m conn (Key Settable BackendSpecific)
-    op2 s = do
-      migr s
-      k <- insert s
-      k2 <- insert s
-      return k2
-
-    op3 :: (MonadIO m, Functor m, PersistBackendConn conn) => Settable -> TryAction TestException m conn (Key Settable BackendSpecific)
-    op3 s = do
-      migr s
-      k <- insert s
-      return k
-
-testTryActionExceptT :: ( MonadIO m
-                        , MonadBaseControl IO m
-                        , MonadCatch m
-                        , TryConnectionManager conn
-                        , ConnectionManager conn
-                        , PersistBackendConn conn
-                        , ExtractConnection conn conn)
-                     => conn -> m ()
-testTryActionExceptT c = do
-  singleKey <- runDbConn op1 c
-  let settable = Settable "abc" (Just singleKey) (1, ("qqq", Nothing))
-  shouldFail <- runTryDbConn (op2 settable) c
-  checkLeft shouldFail
-  shouldSucceed <- runTryDbConn (op3 settable) c
-  checkRight shouldSucceed
+  result <- runTryDbConn throwException c
+  checkLeft result  -- should be (Left error)
 
   where
-    op1 :: (PersistBackend m) => m (Key (Single String) BackendSpecific)
-    op1 = do
-      let val = Single "def"
+    dbException :: (MonadIO m, Functor m, PersistBackendConn conn) => TryAction TestException m conn ()
+    dbException = do
+      let val = UniqueKeySample 1 2 (Just 3)
       migr val
-      k <- insert val
-      return k
+      insert val
+      insert val  -- should fail with uniqueness exception
 
-    op2 :: (MonadIO m, Functor m, PersistBackendConn conn) => Settable -> TryAction TestException m conn (Key Settable BackendSpecific)
-    op2 s = do
-      migr s
-      k <- insert s
+    throwException :: (MonadIO m, Functor m, PersistBackendConn conn) => TryAction TestException m conn ()
+    throwException = do
       lift $ throwE TestException
-      return k
+      return ()
 
-    op3 :: (MonadIO m, Functor m, PersistBackendConn conn) => Settable -> TryAction TestException m conn (Key Settable BackendSpecific)
-    op3 s = do
-      migr s
-      k <- insert s
-      return k
-  
+    success :: (MonadIO m, Functor m, PersistBackendConn conn) => TryAction TestException m conn ()
+    success = do
+      return ()
+
 testSchemas :: PersistBackend m => m ()
 testSchemas = do
   let val = InCurrentSchema Nothing
@@ -1147,12 +1113,14 @@ queryRaw' query vals = do
   proxy <- phantomDb
   queryRaw True (reescape proxy query) vals
 
+
+-- These helpers are useful for Either a SomeException since the exception is not Eq and cannot be compared
 checkLeft :: MonadIO m => Either a b -> m ()
 checkLeft e = case e of
   Right _ -> liftIO $ H.assertFailure "exception not caught"
   Left _ -> return ()
 
-checkRight :: MonadIO m => Either a b -> m ()
+checkRight :: (MonadIO m, Show a) => Either a b -> m ()
 checkRight e = case e of
   Right _ -> return ()
-  Left _ -> liftIO $ H.assertFailure "exception should not have been caught"
+  Left e -> liftIO $ H.assertFailure ("caught unexpected exception: " ++ show e)

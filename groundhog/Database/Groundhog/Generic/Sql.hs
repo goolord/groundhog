@@ -1,10 +1,10 @@
-{-# LANGUAGE FlexibleContexts, OverloadedStrings, FlexibleInstances, TypeFamilies, RecordWildCards #-}
+{-# LANGUAGE FlexibleContexts, OverloadedStrings, FlexibleInstances, TypeFamilies, RecordWildCards, ScopedTypeVariables#-}
 {-# LANGUAGE CPP #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | This module defines the functions which are used only for backends creation.
 module Database.Groundhog.Generic.Sql
-    ( 
+    (
     -- * SQL rendering utilities
       renderCond
     , defaultShowPrim
@@ -102,8 +102,10 @@ class SqlDb db => FloatingSqlDb db where
   logBase' :: (ExpressionOf db r b a, ExpressionOf db r x a, Floating a) => b -> x -> Expr db r a
 
 -- | If we reuse complex expression several times, prerendering it saves time. `RenderConfig` can be obtained with `mkExprWithConf`
-prerenderExpr :: SqlDb db => RenderConfig -> Expr db r a -> Expr db r a
-prerenderExpr conf (Expr e) = Expr $ ExprRaw $ Snippet $ \_ _ -> prerendered where
+prerenderExpr :: forall db r a. (SqlDb db, PersistField a) => RenderConfig -> Expr db r a -> Expr db r a
+prerenderExpr conf (Expr e) = Expr $ ExprRaw typ $ Snippet $ \_ _ -> prerendered where
+  proxy = undefined :: proxy db
+  typ = dbType proxy (undefined :: a)
   -- Priority of outer operation is not known. Assuming that it is high ensures that parentheses won't be missing.
   prerendered = renderExprExtended conf maxBound e
 
@@ -122,22 +124,22 @@ renderExpr conf expr = renderExprPriority conf 0 expr
 
 renderExprPriority :: SqlDb db => RenderConfig -> Int -> UntypedExpr db r -> RenderS db r
 renderExprPriority conf p expr = (case expr of
-  ExprRaw (Snippet f) -> let vals = f conf p in ensureOne vals id
+  ExprRaw _ (Snippet f) -> explicitHead (f conf p)
   ExprField f -> let fs = renderChain conf f []
-                 in ensureOne fs $ \f' -> RenderS f' id
+                 in RenderS (explicitHead fs) id
   ExprPure  a -> let vals = toPurePersistValues a
-                 in ensureOne (vals []) renderPersistValue
+                 in renderPersistValue $ explicitHead (vals [])
   ExprCond  a -> case renderCondPriority conf p a of
                    Nothing -> error "renderExprPriority: empty condition"
                    Just x -> x) where
-    ensureOne :: [a] -> (a -> b) -> b
-    ensureOne xs f = case xs of
-      [x] -> f x
+    explicitHead :: [a] -> a
+    explicitHead xs = case xs of
+      [x] -> x
       xs' -> error $ "renderExprPriority: expected one column field, found " ++ show (length xs')
 
 renderExprExtended :: SqlDb db => RenderConfig -> Int -> UntypedExpr db r -> [RenderS db r]
 renderExprExtended conf p expr = (case expr of
-  ExprRaw (Snippet f) -> f conf p
+  ExprRaw _ (Snippet f) -> f conf p
   ExprField f -> map (flip RenderS id) $ renderChain conf f []
   ExprPure a -> let vals = toPurePersistValues a []
                 in map renderPersistValue vals
@@ -177,8 +179,10 @@ operator pr op = \a b -> Snippet $ \conf p ->
 function :: SqlDb db => String -> [UntypedExpr db r] -> Snippet db r
 function func args = Snippet $ \conf _ -> [fromString func <> fromChar '(' <> commasJoin (map (renderExpr conf) args) <> fromChar ')']
 
-mkExpr :: SqlDb db => Snippet db r -> Expr db r a
-mkExpr = Expr . ExprRaw
+mkExpr :: forall db r a . (SqlDb db, PersistField a) => Snippet db r -> Expr db r a
+mkExpr snippet = Expr $ ExprRaw typ snippet where
+  proxy = undefined :: proxy db
+  typ = dbType proxy (undefined :: a)
 
 #if !MIN_VERSION_base(4, 5, 0)
 {-# INLINABLE (<>) #-}
@@ -191,11 +195,19 @@ mkExpr = Expr . ExprRaw
 renderCond :: SqlDb db
   => RenderConfig
   -> Cond db r -> Maybe (RenderS db r)
-renderCond conf cond = renderCondPriority conf 0 cond where
+renderCond conf cond = renderCondPriority conf 0 cond
+
+flattenNullables :: DbType -> [Bool]
+flattenNullables typ = go typ [] where
+  go :: DbType -> [Bool] -> [Bool]
+  go typ acc = case typ of
+    DbEmbedded (EmbeddedDef _ ts) _ -> foldr go acc $ map snd ts
+    DbList _ _ -> False : acc
+    DbTypePrimitive _ nullable _ _ -> nullable : acc
 
 {-# INLINABLE renderCondPriority #-}
 -- | Renders conditions for SQL backend. Returns Nothing if the fields don't have any columns.
-renderCondPriority :: SqlDb db
+renderCondPriority :: forall db r . SqlDb db
   => RenderConfig
   -> Int -> Cond db r -> Maybe (RenderS db r)
 renderCondPriority conf@RenderConfig{..} priority cond = go cond priority where
@@ -204,25 +216,46 @@ renderCondPriority conf@RenderConfig{..} priority cond = go cond priority where
   go (Not CondEmpty) _ = Just "(1=0)" -- special case for False
   go (Not a)         p = fmap (\a' -> parens notP p $ "NOT " <> a') $ go a notP
   go (Compare compOp f1 f2) p = (case compOp of
-    Eq -> renderComp andP " AND " 37 equalsOperator f1 f2
-    Ne -> renderComp orP " OR " 50 notEqualsOperator f1 f2
+    Eq -> renderCompOps andP " AND " 37 ops f1 f2 where
+      ops = map (\isNull -> if isNull then equalsOperator else (\a b -> a <> fromChar '=' <> b)) eitherNullable
+    Ne -> renderCompOps andP " OR " 50 ops f1 f2 where
+      ops = map (\isNull -> if isNull then notEqualsOperator else (\a b -> a <> "<>" <> b)) eitherNullable
     Gt -> renderComp orP " OR " 38 (\a b -> a <> fromChar '>' <> b) f1 f2
     Lt -> renderComp orP " OR " 38 (\a b -> a <> fromChar '<' <> b) f1 f2
     Ge -> renderComp orP " OR " 38 (\a b -> a <> ">=" <> b) f1 f2
     Le -> renderComp orP " OR " 38 (\a b -> a <> "<=" <> b) f1 f2) where
-      renderComp interP interOp opP op expr1 expr2 = result where
+      proxy = undefined :: proxy db
+
+      eitherNullable = zipWith (||) (nullables f1) (nullables f2)
+
+      nullables expr = case expr of
+        ExprRaw t _ -> flattenNullables t
+        ExprField ((_, t), _) -> flattenNullables t
+        ExprPure a -> flattenNullables $ dbType proxy a
+        ExprCond a -> [False]
+
+      renderZip opP op expr1 expr2 = zipWith op expr1' expr2' where
         expr1' = renderExprExtended conf opP expr1
         expr2' = renderExprExtended conf opP expr2
-        result = case zipWith op expr1' expr2' of
-          [] -> Nothing
-          [clause] -> Just $ parens (opP - 1) p clause  -- put lower priority to make parentheses appear when the same operator is nested
-          clauses  -> Just $ parens interP p $ intercalateS interOp clauses
+
+      renderZip3 opP ops expr1 expr2 = zipWith3 (\op e1 e2 -> op e1 e2) ops expr1' expr2' where
+        expr1' = renderExprExtended conf opP expr1
+        expr2' = renderExprExtended conf opP expr2
+
+      groupComparisons interP interOp opP comparisons = case comparisons of
+        [] -> Nothing
+        [clause] -> Just $ parens (opP - 1) p clause  -- put lower priority to make parentheses appear when the same operator is nested
+        clauses  -> Just $ parens interP p $ intercalateS interOp clauses
+
+      renderComp interP interOp opP op expr1 expr2 = groupComparisons interP interOp opP $ renderZip opP op expr1 expr2
+      renderCompOps interP interOp opP ops expr1 expr2 = groupComparisons interP interOp opP $ renderZip3 opP ops expr1 expr2
+
   go (CondRaw (Snippet f)) p = case f conf p of
     [] -> Nothing
     [a] -> Just a
     _ -> error "renderCond: cannot render CondRaw with many elements"
   go CondEmpty _ = Nothing
- 
+
   notP = 35
   andP = 30
   orP = 20
@@ -237,16 +270,16 @@ renderCondPriority conf@RenderConfig{..} priority cond = go cond priority where
 
 {-
 examples of prefixes
-[("val1", DbEmbedded False _), ("val4", EmbeddedDef False _), ("val5", EmbeddedDef False _)] -> "val5$val4$val1"
-[("val1", DbEmbedded True _),  ("val4", EmbeddedDef False _), ("val5", EmbeddedDef False _)] -> ""
-[("val1", DbEmbedded False _), ("val4", EmbeddedDef True _),  ("val5", EmbeddedDef False _)] -> "val1"
-[("val1", DbEmbedded False _), ("val4", EmbeddedDef True _),  ("val5", EmbeddedDef True _)] -> "val1"
-[("val1", DbEmbedded False _), ("val4", EmbeddedDef False _), ("val5", EmbeddedDef True _)] -> "val4$val1"
+[("val1", EmbeddedDef False _), ("val4", EmbeddedDef False _), ("val5", EmbeddedDef False _)] -> "val5$val4$val1"
+[("val1", EmbeddedDef True _),  ("val4", EmbeddedDef False _), ("val5", EmbeddedDef False _)] -> ""
+[("val1", EmbeddedDef False _), ("val4", EmbeddedDef True _),  ("val5", EmbeddedDef False _)] -> "val1"
+[("val1", EmbeddedDef False _), ("val4", EmbeddedDef True _),  ("val5", EmbeddedDef True _)] -> "val1"
+[("val1", EmbeddedDef False _), ("val4", EmbeddedDef False _), ("val5", EmbeddedDef True _)] -> "val4$val1"
 -}
 {-# INLINABLE renderChain #-}
 renderChain :: RenderConfig -> FieldChain -> [Utf8] -> [Utf8]
 renderChain RenderConfig{..} (f, prefix) acc = (case prefix of
-  ((name, EmbeddedDef False _):fs) -> flattenP esc (goP (fromString name) fs) f acc
+  ((name, EmbeddedDef False _):fs) -> flattenP esc (Just $ goP (fromString name) fs) f acc
   _ -> flatten esc f acc) where
   goP p ((name, EmbeddedDef False _):fs) = goP (fromString name <> fromChar delim <> p) fs
   goP p _ = p
@@ -287,26 +320,21 @@ renderOrders conf xs = if null orders then mempty else " ORDER BY " <> commasJoi
 renderFields :: StringLike s => (s -> s) -> [(String, DbType)] -> s
 renderFields escape = commasJoin . foldr (flatten escape) []
 
--- TODO: merge code of flatten and flattenP
 {-# SPECIALIZE flatten :: (Utf8 -> Utf8) -> (String, DbType) -> ([Utf8] -> [Utf8]) #-}
 flatten :: StringLike s => (s -> s) -> (String, DbType) -> ([s] -> [s])
-flatten escape (fname, typ) acc = go typ where
-  go typ' = case typ' of
-    DbEmbedded emb _ -> handleEmb emb
-    _            -> escape fullName : acc
-  fullName = fromString fname
-  handleEmb (EmbeddedDef False ts) = foldr (flattenP escape fullName) acc ts
-  handleEmb (EmbeddedDef True  ts) = foldr (flatten escape) acc ts
+flatten escape (fname, typ) acc = flattenP escape Nothing (fname, typ) acc
 
-{-# SPECIALIZE flattenP :: (Utf8 -> Utf8) -> Utf8 -> (String, DbType) -> ([Utf8] -> [Utf8]) #-}
-flattenP :: StringLike s => (s -> s) -> s -> (String, DbType) -> ([s] -> [s])
+{-# SPECIALIZE flattenP :: (Utf8 -> Utf8) -> Maybe Utf8 -> (String, DbType) -> ([Utf8] -> [Utf8]) #-}
+flattenP :: StringLike s => (s -> s) -> Maybe s -> (String, DbType) -> ([s] -> [s])
 flattenP escape prefix (fname, typ) acc = go typ where
   go typ' = case typ' of
     DbEmbedded emb _ -> handleEmb emb
     _            -> escape fullName : acc
-  fullName = prefix <> fromChar delim <> fromString fname
-  handleEmb (EmbeddedDef False ts) = foldr (flattenP escape fullName) acc ts
-  handleEmb (EmbeddedDef True  ts) = foldr (flatten escape) acc ts
+  fullName = case prefix of
+    Nothing -> fromString fname
+    Just prefix -> prefix <> fromChar delim <> fromString fname
+  handleEmb (EmbeddedDef False ts) = foldr (flattenP escape (Just fullName)) acc ts
+  handleEmb (EmbeddedDef True  ts) = foldr (flattenP escape Nothing) acc ts
 
 commasJoin :: StringLike s => [s] -> s
 commasJoin = intercalateS (fromChar ',')
